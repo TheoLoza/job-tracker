@@ -4,7 +4,7 @@ name: job-tracker
 # Actions tab (the "Run workflow" button) — handy for testing.
 on:
   schedule:
-    - cron: "0 13 * * * *"
+    - cron: "0 13 * * *"
   workflow_dispatch: {}
 
 jobs:
