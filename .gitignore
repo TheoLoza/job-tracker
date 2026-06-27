@@ -16,5 +16,4 @@ env/
 .vscode/
 
 # Misc 
-requirements.txt
 SETUP-GITHUB.md

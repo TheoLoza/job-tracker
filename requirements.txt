@@ -1,0 +1,11 @@
+# Gmail: Google's official auth + API client.
+# OAuth is genuinely fiddly, so we let Google's library handle it.
+google-auth
+google-auth-oauthlib
+google-api-python-client
+
+# Notion: we talk to it with plain HTTP so you can see the raw API.
+requests
+
+# Loads NOTION_TOKEN / NOTION_DATABASE_ID from your .env file.
+python-dotenv
