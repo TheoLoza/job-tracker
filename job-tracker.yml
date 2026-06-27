@@ -1,0 +1,39 @@
+name: job-tracker
+
+# Runs automatically on a schedule, and can also be triggered by hand from the
+# Actions tab (the "Run workflow" button) — handy for testing.
+on:
+  schedule:
+    - cron: "0 13* * * *"
+  workflow_dispatch: {}
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore Gmail credential files from secrets
+        # The two JSON files never live in the repo. We rebuild them at runtime
+        # from encrypted GitHub Secrets, then they vanish when the run ends.
+        run: |
+          printf '%s' "$GMAIL_CLIENT_SECRET" > client_secret.json
+          printf '%s' "$GMAIL_TOKEN" > token.json
+        env:
+          GMAIL_CLIENT_SECRET: ${{ secrets.GMAIL_CLIENT_SECRET }}
+          GMAIL_TOKEN: ${{ secrets.GMAIL_TOKEN }}
+
+      - name: Run the tracker
+        run: python main.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
