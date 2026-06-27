@@ -1,13 +1,7 @@
 """
 gmail_client.py
 ---------------
-Two jobs:
-  1. authenticate()      -> logs into Gmail (once via browser, then cached)
-  2. get_latest_message  -> pulls the most recent inbox email as a tidy dict
-
-You generally won't need to touch the auth dance — it's standard Google
-boilerplate. The interesting part for later phases is how we read and parse
-messages.
+Gmail auth, reading untracked mail, and labeling.
 """
 
 import os
@@ -22,35 +16,19 @@ import config
 
 
 def authenticate():
-    """
-    Returns an authorized Gmail 'service' object you can make API calls on.
-
-    Flow:
-      - If token.json exists and is valid -> use it (no browser).
-      - If it's expired but refreshable     -> refresh silently.
-      - Otherwise                           -> open a browser to log in,
-                                               then SAVE token.json for next time.
-    """
+    """Return an authorized Gmail service (browser login once, then cached)."""
     creds = None
-
-    # token.json stores your access + refresh tokens from a previous run.
     if os.path.exists(config.TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(config.TOKEN_FILE, config.SCOPES)
 
-    # No (valid) credentials available -> get some.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())  # silent refresh, no browser
         else:
-            # First-ever run: this pops open a browser window asking you to
-            # pick your job-hunt Gmail account and approve access.
             flow = InstalledAppFlow.from_client_secrets_file(
                 config.CLIENT_SECRET_FILE, config.SCOPES
             )
             creds = flow.run_local_server(port=0)
-
-        # Save so the next run skips the browser entirely.
-        # (This token.json is what GitHub Actions will use later to run unattended.)
         with open(config.TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
 
@@ -58,37 +36,75 @@ def authenticate():
 
 
 def _header(headers, name):
-    """Pull a single header value (e.g. 'Subject') out of Gmail's header list."""
     for h in headers:
         if h["name"].lower() == name.lower():
             return h["value"]
     return ""
 
 
-def get_latest_message(service):
-    """
-    Grab the single most recent message from the inbox and return a small,
-    friendly dict. Returns None if the inbox is empty.
-    """
-    # Step 1: list message IDs (this does NOT include the content yet).
-    resp = (
-        service.users()
-        .messages()
-        .list(userId="me", maxResults=1, labelIds=["INBOX"])
-        .execute()
-    )
-    messages = resp.get("messages", [])
-    if not messages:
-        return None
+def _decode(data):
+    return base64.urlsafe_b64decode(data.encode("utf-8")).decode("utf-8", errors="replace")
 
-    # Step 2: fetch the full message by id.
-    msg_id = messages[0]["id"]
-    msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
 
+def _extract_body(payload):
+    """Walk the MIME tree and return plain-text body (best effort)."""
+    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+        return _decode(payload["body"]["data"])
+    text = ""
+    for part in payload.get("parts", []) or []:
+        mime = part.get("mimeType", "")
+        if mime == "text/plain" and part.get("body", {}).get("data"):
+            text += _decode(part["body"]["data"])
+        elif mime.startswith("multipart/"):
+            text += _extract_body(part)  # nested parts
+    return text
+
+
+def _parse(msg):
     headers = msg["payload"].get("headers", [])
     return {
-        "id": msg_id,
+        "id": msg["id"],
         "from": _header(headers, "From"),
         "subject": _header(headers, "Subject"),
-        "snippet": msg.get("snippet", ""),  # Gmail's short preview text
+        "snippet": msg.get("snippet", ""),
+        "body": _extract_body(msg["payload"])[:5000],  # cap; only used for keywords
     }
+
+
+def get_untracked_messages(service, max_results=25):
+    """
+    Parsed inbox emails we haven't tagged yet. The Gmail query excludes the
+    `tracked` label, so each email is handled exactly once across runs.
+    """
+    query = f"in:inbox -label:{config.TRACKED_LABEL} newer_than:{config.LOOKBACK_DAYS}d"
+    resp = (
+        service.users().messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+    )
+    out = []
+    for m in resp.get("messages", []):
+        full = service.users().messages().get(userId="me", id=m["id"], format="full").execute()
+        out.append(_parse(full))
+    return out
+
+
+def ensure_label(service):
+    """Return the id of the `tracked` label, creating it if it doesn't exist."""
+    labels = service.users().labels().list(userId="me").execute().get("labels", [])
+    for lbl in labels:
+        if lbl["name"].lower() == config.TRACKED_LABEL.lower():
+            return lbl["id"]
+    created = (
+        service.users().labels()
+        .create(userId="me", body={"name": config.TRACKED_LABEL})
+        .execute()
+    )
+    return created["id"]
+
+
+def mark_tracked(service, msg_id, label_id):
+    """Stamp the `tracked` label so future runs skip this message."""
+    service.users().messages().modify(
+        userId="me", id=msg_id, body={"addLabelIds": [label_id]}
+    ).execute()

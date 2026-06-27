@@ -1,16 +1,12 @@
 """
 config.py
 ---------
-One place for all the settings the rest of the code reads.
-Keeping this separate means the "what" (your values) lives here,
-and the "how" (the logic) lives in the other files.
+One place for all settings the rest of the code reads.
 """
 
 import os
 from dotenv import load_dotenv
 
-# Reads the .env file in this folder and loads its KEY=VALUE pairs
-# into environment variables that os.getenv() can see.
 load_dotenv()
 
 # ---- Notion ----
@@ -18,16 +14,18 @@ NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 # ---- Gmail ----
-# The OAuth client you downloaded from Google Cloud.
 CLIENT_SECRET_FILE = "client_secret.json"
-# Created automatically on first run; reused after that so you don't
-# have to log in through the browser every time.
 TOKEN_FILE = "token.json"
-
-# Scope = what you're allowed to do.
-# gmail.modify lets us READ messages AND add labels later (Phase 1+).
-# If you want to be read-only for now, swap to: gmail.readonly
+# gmail.modify = read messages AND add labels (we need both in Phase 1).
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+
+# ---- Behaviour ----
+# Gmail label stamped on emails we've handled, so they're never processed twice.
+TRACKED_LABEL = "tracked"
+# Only look at mail from the last N days (bounds work + speeds up each run).
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
+# DRY_RUN=true -> classify and print, but DON'T write to Notion or add labels.
+DRY_RUN = os.getenv("DRY_RUN", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 def check():

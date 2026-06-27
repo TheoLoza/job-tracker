@@ -1,60 +1,92 @@
 """
 notion_writer.py
 ----------------
-Writes a single row (a "page") into your Notion database using the raw REST
-API via `requests`. We do this by hand (instead of a Notion SDK) so you can
-see exactly what the API expects — this is the part worth understanding.
+Talk to Notion via raw REST: create rows, find an existing application, and
+update a row's status. We use `requests` (not an SDK) so the API is visible.
 
-Key idea: every Notion property type has its OWN shape in the JSON.
-  - title     -> {"title":     [{"text": {"content": "..."}}]}
-  - rich_text -> {"rich_text": [{"text": {"content": "..."}}]}
-  - select    -> {"select": {"name": "Applied"}}
-  - date      -> {"date": {"start": "2026-06-27"}}
-  - url       -> {"url": "https://..."}
-The KEYS ("Company", "Status", ...) must match your DB column names EXACTLY.
+Property shapes (the KEYS must match your DB column names EXACTLY):
+  title     -> {"title":     [{"text": {"content": "..."}}]}
+  rich_text -> {"rich_text": [{"text": {"content": "..."}}]}
+  select    -> {"select": {"name": "Applied"}}
+  date      -> {"date": {"start": "2026-06-27"}}
+  url       -> {"url": "https://..."}
 """
 
+import datetime
 import requests
 
 import config
 
-NOTION_API = "https://api.notion.com/v1/pages"
-
+BASE = "https://api.notion.com/v1"
 HEADERS = {
     "Authorization": f"Bearer {config.NOTION_TOKEN}",
-    "Notion-Version": "2022-06-28",   # pin a version so the API shape is stable
+    "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
 }
 
 
-def create_row(company, role, status, date_applied, notes="", email_link=None):
-    """
-    Create one row in the database. Returns the new page's URL on success.
-    Raises with Notion's error message if something's off (e.g. a column name
-    typo, or the integration not being connected to the DB).
-    """
-    properties = {
-        "Company": {"title": [{"text": {"content": company}}]},
-        "Role": {"rich_text": [{"text": {"content": role}}]},
-        "Status": {"select": {"name": status}},
-        "Date Applied": {"date": {"start": date_applied}},
-        "Notes": {"rich_text": [{"text": {"content": notes}}]},
-    }
-    # URL property only accepts a real URL or null — skip it if we don't have one.
-    if email_link:
-        properties["Email Link"] = {"url": email_link}
-
-    payload = {
-        "parent": {"database_id": config.NOTION_DATABASE_ID},
-        "properties": properties,
-    }
-
-    resp = requests.post(NOTION_API, headers=HEADERS, json=payload)
-
+def _check(resp):
     if resp.status_code != 200:
-        # Surface Notion's actual complaint instead of a generic error.
-        # The classic one here is "Could not find database" = integration
-        # isn't connected to the DB, or the id is wrong.
+        # Surface Notion's actual complaint. Classic ones:
+        #   "Could not find database" -> integration not connected / wrong id
+        #   property errors           -> a column name below doesn't match your DB
         raise RuntimeError(f"Notion API error {resp.status_code}: {resp.text}")
+    return resp.json()
 
-    return resp.json().get("url")
+
+def create_row(company, role, status, date_applied=None, notes="", email_link=None):
+    """Create one row and return its Notion URL."""
+    today = datetime.date.today().isoformat()
+    props = {
+        "Company": {"title": [{"text": {"content": company or "Unknown"}}]},
+        "Role": {"rich_text": [{"text": {"content": role or ""}}]},
+        "Status": {"select": {"name": status}},
+        "Date Applied": {"date": {"start": date_applied or today}},
+        "Last Update": {"date": {"start": today}},
+        "Notes": {"rich_text": [{"text": {"content": notes or ""}}]},
+    }
+    if email_link:
+        props["Email Link"] = {"url": email_link}
+    payload = {"parent": {"database_id": config.NOTION_DATABASE_ID}, "properties": props}
+    return _check(requests.post(f"{BASE}/pages", headers=HEADERS, json=payload)).get("url")
+
+
+def find_open_application(company):
+    """
+    Return the page id of an existing 'Applied' row whose Company contains the
+    given name (Notion's `contains` is case-insensitive), or None.
+
+    NOTE: this is the fuzzy-matching part. In Phase 1 we match on company name
+    only, which can miss when the rejection email names the company differently
+    than the application email did. Phase 3 will make matching smarter.
+    """
+    if not company:
+        return None
+    payload = {
+        "filter": {
+            "and": [
+                {"property": "Company", "title": {"contains": company}},
+                {"property": "Status", "select": {"equals": "Applied"}},
+            ]
+        },
+        "page_size": 1,
+    }
+    data = _check(
+        requests.post(
+            f"{BASE}/databases/{config.NOTION_DATABASE_ID}/query",
+            headers=HEADERS, json=payload,
+        )
+    )
+    results = data.get("results", [])
+    return results[0]["id"] if results else None
+
+
+def update_status(page_id, status):
+    """Flip an existing row's Status and bump Last Update to today."""
+    payload = {
+        "properties": {
+            "Status": {"select": {"name": status}},
+            "Last Update": {"date": {"start": datetime.date.today().isoformat()}},
+        }
+    }
+    return _check(requests.patch(f"{BASE}/pages/{page_id}", headers=HEADERS, json=payload)).get("url")

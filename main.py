@@ -1,54 +1,78 @@
 """
-main.py  —  PHASE 0
--------------------
-Goal: prove the two pipes connect. No classification, no logic yet.
+main.py — PHASE 1
+-----------------
+Reads untracked inbox mail, classifies each email with simple rules, and
+records it in Notion:
+  - Applied  -> create a new row
+  - Rejected -> update the matching 'Applied' row (or create one if none found)
+  - Ignore   -> skip, leave unlabeled so smarter logic later can re-check it
 
-What it does:
-  1. Authenticates to Gmail.
-  2. Reads the most recent email in the inbox.
-  3. Writes ONE test row to your Notion database, stuffing that email's
-     subject + snippet into the Notes field.
+Emails we act on get the `tracked` Gmail label, so they're never handled twice.
 
-If a new row shows up in Notion containing text from a real email in your
-inbox, BOTH halves of the system work and you're ready for Phase 1.
+TIP: set DRY_RUN=true in your .env to classify and print WITHOUT writing to
+Notion or labeling — great for sanity-checking the rules against real mail.
 """
-
-import datetime
 
 import config
 import gmail_client
 import notion_writer
+from classifier import classify
+
+
+def handle(email, result):
+    """Act on one classified email. Returns a log string, or None if ignored."""
+    status, company, role = result["status"], result["company"], result["role"]
+
+    if status == "Applied":
+        notion_writer.create_row(company, role, "Applied", notes=email["subject"])
+        return f"Applied   {company} ({role or 'role?'})"
+
+    if status == "Rejected":
+        page_id = notion_writer.find_open_application(company)
+        if page_id:
+            notion_writer.update_status(page_id, "Rejected")
+            return f"Rejected  {company} (updated existing row)"
+        notion_writer.create_row(company, role, "Rejected", notes=email["subject"])
+        return f"Rejected  {company} (no match found, created row)"
+
+    return None  # Ignore
 
 
 def main():
-    # Bail early with a clear message if a secret/file is missing.
     config.check()
-
-    print("Authenticating to Gmail...")
     service = gmail_client.authenticate()
 
-    print("Reading your latest inbox message...")
-    email = gmail_client.get_latest_message(service)
-
-    if email is None:
-        print("Inbox is empty — send yourself a test email and rerun.")
+    print("Fetching untracked inbox mail...")
+    emails = gmail_client.get_untracked_messages(service)
+    if not emails:
+        print("Nothing new to process.")
         return
+    print(f"Found {len(emails)} email(s) to look at.\n")
 
-    print(f"  From:    {email['from']}")
-    print(f"  Subject: {email['subject']}")
+    label_id = None if config.DRY_RUN else gmail_client.ensure_label(service)
+    counts = {"Applied": 0, "Rejected": 0, "Ignore": 0}
 
-    print("Writing a test row to Notion...")
-    today = datetime.date.today().isoformat()  # e.g. "2026-06-27"
-    url = notion_writer.create_row(
-        company="TEST ROW — delete me",
-        role="(phase 0 connectivity check)",
-        status="Applied",
-        date_applied=today,
-        notes=f"Latest email was: {email['subject']} — {email['snippet']}",
+    for email in emails:
+        result = classify(email)
+        counts[result["status"]] = counts.get(result["status"], 0) + 1
+
+        if config.DRY_RUN:
+            print(f"[dry-run] {result['status']:8} | {email['subject'][:65]}")
+            continue
+
+        msg = handle(email, result)
+        if msg:
+            print("  " + msg)
+            # Only label emails we acted on; ignored mail stays unlabeled so a
+            # future (smarter) run can reconsider it.
+            gmail_client.mark_tracked(service, email["id"], label_id)
+
+    print(
+        f"\nDone. Applied: {counts['Applied']}  "
+        f"Rejected: {counts['Rejected']}  Ignored: {counts['Ignore']}"
     )
-
-    print(f"\n Done. Row created: {url}")
-    print("Open your Notion DB — if you see that row, Phase 0 passed.")
+    if config.DRY_RUN:
+        print("(DRY_RUN was on — nothing was written to Notion or labeled.)")
 
 
 if __name__ == "__main__":
