@@ -1,6 +1,5 @@
 # ---- SECRETS: never commit these ----
 .env
-.env.example
 client_secret.json
 token.json
 
