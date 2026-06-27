@@ -1,19 +1,16 @@
 """
 classifier.py
 -------------
-Rules-based email classifier for Phase 1. No AI yet — just sender domains and
-keyword matching. Returns: {"status", "company", "role"}.
+Rules-based email classifier. Free, transparent, no AI. Returns:
+  {"status", "company", "role"}  where status is "Applied" / "Rejected" / "Ignore".
 
-status is one of: "Applied", "Rejected", "Ignore".
-
-This is deliberately simple and transparent. Phase 2 will hand the ambiguous
-cases to an LLM and do much better company/role extraction.
+When an email is a FORWARD, we classify using the ORIGINAL sender/subject
+(parsed out of the body by gmail_client) instead of the outer header — so the
+company comes out right even though you forwarded the mail to yourself.
 """
 
 import re
 
-# Mail from these applicant-tracking-system / careers senders is very likely
-# job-related, which raises our confidence that it's worth classifying.
 ATS_DOMAINS = (
     "greenhouse.io", "greenhouse-mail.io", "lever.co", "hire.lever.co",
     "ashbyhq.com", "myworkday.com", "myworkdayjobs.com", "icims.com",
@@ -21,8 +18,7 @@ ATS_DOMAINS = (
     "workable.com", "breezy.hr", "bamboohr.com", "rippling.com",
 )
 
-# Checked FIRST — rejections are often phrased politely and also contain
-# "thank you for applying" type language, so rejection signals win ties.
+# Checked FIRST — rejections are often polite and also say "thanks for applying".
 REJECTION_PHRASES = (
     "unfortunately", "we regret", "regret to inform", "not moving forward",
     "will not be moving forward", "won't be moving forward", "not be moving forward",
@@ -33,7 +29,6 @@ REJECTION_PHRASES = (
     "decided to proceed with other",
 )
 
-# Confirmation-of-application signals.
 APPLIED_PHRASES = (
     "application received", "we received your application", "received your application",
     "thank you for applying", "thanks for applying", "application has been received",
@@ -42,13 +37,23 @@ APPLIED_PHRASES = (
 )
 
 
-def _domain(from_header):
-    m = re.search(r"@([\w.-]+)", from_header or "")
+# ---- forward-aware accessors: prefer the ORIGINAL sender/subject if present ----
+def _eff_from(email):
+    return email.get("original_from") or email.get("from", "")
+
+
+def _eff_subject(email):
+    return email.get("original_subject") or email.get("subject", "")
+
+
+def _domain(email):
+    m = re.search(r"@([\w.-]+)", _eff_from(email) or "")
     return m.group(1).lower() if m else ""
 
 
 def _blob(email):
-    return f"{email['subject']} {email['snippet']} {email['body']}".lower()
+    # Body always included so keyword checks work even on odd subjects.
+    return f"{_eff_subject(email)} {email.get('snippet','')} {email.get('body','')}".lower()
 
 
 def _looks_job_related(email, domain):
@@ -60,7 +65,7 @@ def _looks_job_related(email, domain):
 
 def _guess_company(email, domain):
     """Best-effort company name from subject patterns or the sender name."""
-    subject = email["subject"] or ""
+    subject = _eff_subject(email) or ""
     for pat in (
         r"application to ([A-Z][\w&.\- ]+)",
         r"applying to ([A-Z][\w&.\- ]+)",
@@ -70,8 +75,8 @@ def _guess_company(email, domain):
         m = re.search(pat, subject)
         if m:
             return m.group(1).strip(" .!-")
-    # Fall back to the From display name, e.g. "Acme Careers <no-reply@...>".
-    m = re.match(r'\s*"?([^"<]+?)"?\s*<', email["from"] or "")
+    # Fall back to the (original) From display name, e.g. "Acme Careers <...>".
+    m = re.match(r'\s*"?([^"<]+?)"?\s*<', _eff_from(email) or "")
     if m:
         name = m.group(1).strip()
         for junk in ("careers", "recruiting", "talent", "no-?reply", "hr", "team", "jobs"):
@@ -84,7 +89,7 @@ def _guess_company(email, domain):
 
 
 def _guess_role(email):
-    subject = email["subject"] or ""
+    subject = _eff_subject(email) or ""
     for pat in (
         r"application (?:received|for)[:\-]?\s*(.+)",
         r"your application for[:\-]?\s*(.+)",
@@ -100,7 +105,7 @@ def _guess_role(email):
 
 
 def classify(email):
-    domain = _domain(email["from"])
+    domain = _domain(email)
 
     if not _looks_job_related(email, domain):
         return {"status": "Ignore", "company": "", "role": ""}
@@ -111,7 +116,6 @@ def classify(email):
     elif any(p in text for p in APPLIED_PHRASES):
         status = "Applied"
     else:
-        # Job-related sender but no clear signal — leave for Phase 2's LLM.
         return {"status": "Ignore", "company": "", "role": ""}
 
     return {

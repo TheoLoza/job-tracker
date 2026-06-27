@@ -97,10 +97,19 @@ Eyeball the results, then set `DRY_RUN=false` and run again for real.
   spot misses.
 - `LOOKBACK_DAYS` in `.env` controls how far back it scans.
 
-### Known limits (improved in later phases)
-- **Rules miss things.** Anything phrased unusually is ignored rather than
-  guessed. Phase 2 adds an LLM to catch the long tail and extract company/role
-  more reliably.
+### Forwarded mail
+This is built to handle the Proton → Gmail forwarding flow. When an email is a
+forward, the real sender/company is parsed out of the quoted body (the
+"Forwarded message / From:" block), so the company is recorded correctly even
+though the outer sender is you. No AI, no cost.
+
+### Known limits
+- **Rules miss unusual phrasing.** Oddly-worded emails are ignored rather than
+  guessed at. For standard ATS mail (Greenhouse, Lever, Workday, Ashby, …) this
+  is rarely an issue. If you spot a miss, add a phrase to `APPLIED_PHRASES` /
+  `REJECTION_PHRASES` or a sender to `ATS_DOMAINS` in `classifier.py`.
 - **Rejection→application matching is fuzzy.** It matches on company name only,
-  so a rejection may not find its application if the company is named
-  differently. Phase 3 makes matching smarter.
+  so occasionally a rejection makes a fresh row instead of updating the original.
+
+Everything here runs at **zero cost** — Gmail API, Notion API, and (next step)
+GitHub Actions are all free.

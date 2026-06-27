@@ -1,10 +1,12 @@
 """
 gmail_client.py
 ---------------
-Gmail auth, reading untracked mail, and labeling.
+Gmail auth, reading untracked mail, parsing forwarded headers, and labeling.
+All free — just the Gmail API.
 """
 
 import os
+import re
 import base64
 
 from google.auth.transport.requests import Request
@@ -60,14 +62,56 @@ def _extract_body(payload):
     return text
 
 
+# Markers that signal a forwarded email. When we see one, the REAL sender is
+# inside the quoted block below it — the outer "From" is just whoever forwarded.
+_FORWARD_MARKERS = (
+    "forwarded message",
+    "begin forwarded message",
+    "-----original message-----",
+)
+
+
+def _parse_forwarded(body):
+    """
+    If this looks like a forward, pull the ORIGINAL From/Subject out of the
+    quoted header block. Returns {} if it's not a forward.
+    This is what fixes the 'company shows up as my name' problem — for free.
+    """
+    low = body.lower()
+    idx = -1
+    for mk in _FORWARD_MARKERS:
+        i = low.find(mk)
+        if i != -1:
+            idx = i
+            break
+    if idx == -1:
+        return {}
+
+    # The original headers sit just after the marker.
+    section = body[idx: idx + 1500]
+    out = {}
+    m = re.search(r"^\s*From:\s*(.+)$", section, flags=re.MULTILINE | re.IGNORECASE)
+    if m:
+        out["from"] = m.group(1).strip()
+    m = re.search(r"^\s*Subject:\s*(.+)$", section, flags=re.MULTILINE | re.IGNORECASE)
+    if m:
+        out["subject"] = m.group(1).strip()
+    return out
+
+
 def _parse(msg):
     headers = msg["payload"].get("headers", [])
+    body = _extract_body(msg["payload"])
+    fwd = _parse_forwarded(body)
     return {
         "id": msg["id"],
         "from": _header(headers, "From"),
         "subject": _header(headers, "Subject"),
         "snippet": msg.get("snippet", ""),
-        "body": _extract_body(msg["payload"])[:5000],  # cap; only used for keywords
+        "body": body[:5000],            # cap; only used for keyword checks
+        # If this was a forward, these hold the ORIGINAL sender/subject.
+        "original_from": fwd.get("from", ""),
+        "original_subject": fwd.get("subject", ""),
     }
 
 
